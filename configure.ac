@@ -2158,6 +2158,14 @@ if test "$enable_dp_dpdk" = "yes"; then
   ])
 fi
 
+dnl ---------
+dnl GROUT
+dnl ---------
+if test "$enable_dp_grout" != "no"; then
+    AC_DEFINE([HAVE_GROUT], [1], [Enable Grout backend])
+    GROUT=true
+fi
+
 dnl -----
 dnl LTTng
 dnl -----
@@ -2832,6 +2840,7 @@ AM_CONDITIONAL([VRRPD], [test "$enable_vrrpd" != "no"])
 AM_CONDITIONAL([PATHD], [test "$enable_pathd" != "no"])
 AM_CONDITIONAL([PATHD_PCEP], [test "$enable_pathd" != "no"])
 AM_CONDITIONAL([DP_DPDK], [test "$enable_dp_dpdk" = "yes"])
+AM_CONDITIONAL([DP_GROUT], [test "$enable_dp_grout" != "no"])
 
 
 AM_CONDITIONAL([PYTHON_RUNTIME_DEPENDENCY], [test "$enable_python_runtime" != "no"])
