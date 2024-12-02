@@ -45,11 +45,150 @@ static const char *plugin_name = "zebra_dplane_grout";
 
 DEFINE_MTYPE_STATIC(ZEBRA, GROUT_PORTS, "ZD Grout port database");
 
-static void dplane_read_notifications(struct event *event) {
-	zlog_debug("grout dplane_read_notifications");
 
-//       event_add_read(grout_ctx.dg_pthread->master, dplane_read_notifications,
-//		NULL, 0, &grout_ctx.dg_t_update);
+static void sync_iface_status(struct interface *iface, struct gr_iface* grout_if) {
+	struct gr_ip4_addr_list_req req4 = {0};
+	struct gr_ip4_addr_list_resp *resp_ip4 = NULL;
+	struct gr_ip6_addr_list_req req6 = {0};
+	struct gr_ip6_addr_list_resp *resp_ip6 = NULL;
+	void * resp_ptr = NULL;
+
+        if (gr_api_client_send_recv(grout_ctx.client, GR_IP4_ADDR_LIST, sizeof(req4), &req4, &resp_ptr) < 0) {
+		if (IS_ZEBRA_DEBUG_DPLANE_GROUT)
+			zlog_err("Error listing ip4 addresses");
+		return;
+	}
+	resp_ip4 = resp_ptr;
+
+        if (gr_api_client_send_recv(grout_ctx.client, GR_IP6_ADDR_LIST, sizeof(req6), &req6, &resp_ptr) < 0) {
+		if (IS_ZEBRA_DEBUG_DPLANE_GROUT)
+			zlog_err("Error listing ip6 addresses");
+		return;
+	}
+	resp_ip6 = resp_ptr;
+
+	if_set_index(iface, grout_if->id +1000);
+	iface->status = ZEBRA_INTERFACE_ACTIVE | ZEBRA_INTERFACE_LINKDETECTION;
+
+	if (grout_if->flags & GR_IFACE_F_UP)
+		iface->flags |= IFF_UP;
+	if (grout_if->flags & GR_IFACE_F_PROMISC)
+		iface->flags |= IFF_PROMISC;
+	if (grout_if->flags & GR_IFACE_F_ALLMULTI)
+		iface->flags |= IFF_ALLMULTI;
+	if (grout_if->state & GR_IFACE_S_RUNNING)
+		iface->flags |= IFF_RUNNING | IFF_LOWER_UP;
+
+	// Force BROADCAST and MULTICAST
+	iface->flags |= IFF_BROADCAST | IFF_MULTICAST;
+
+	iface->speed = 25000;
+	// TODO: read metric from grout ?
+	iface->metric = 100;
+	iface->mtu = grout_if->mtu;
+	iface->configured = true;
+	if (grout_if->type == GR_IFACE_TYPE_PORT) {
+		memcpy(iface->hw_addr, &((struct gr_iface_info_port *)grout_if->info)->mac, 6);
+		iface->hw_addr_len = 6;
+		iface->ll_type = ZEBRA_LLT_ETHER;
+	} else if (grout_if->type == GR_IFACE_TYPE_VLAN) {
+		const struct gr_iface_info_vlan *vlan = (const struct gr_iface_info_vlan *)&grout_if->info;
+
+	        struct zebra_if *zif = (struct zebra_if *)iface->info;
+                struct zebra_l2info_vlan *vlan_info = &zif->l2info.vl;
+		zif->zif_type = ZEBRA_IF_VLAN;
+		zif->zif_slave_type = ZEBRA_IF_SLAVE_NONE;
+
+		vlan_info->vid = vlan->vlan_id;
+
+		memcpy(iface->hw_addr, &((struct gr_iface_info_vlan *)grout_if->info)->mac, 6);
+		iface->hw_addr_len = 6;
+		iface->ll_type = ZEBRA_LLT_ETHER;
+
+		// Cheat for vlan interfaces, force it to be "running",
+		// Until https://github.com/DPDK/grout/issues/94 is fixed
+
+		iface->flags |= IFF_RUNNING | IFF_LOWER_UP;
+	}
+
+	for (size_t j = 0; j < resp_ip4->n_addrs; j++) {
+        	const struct gr_ip4_ifaddr *addr = &resp_ip4->addrs[j];
+		struct in_addr sin_addr;
+		uint8_t flags;
+
+		if (addr->iface_id == grout_if->id) {
+			sin_addr.s_addr = addr->addr.ip;
+			connected_add_ipv4(iface, flags, &sin_addr, addr->addr.prefixlen, NULL,
+					NULL, 100);
+			iface->flags |= IFF_IPV4;
+		}
+	}
+
+	for (size_t j = 0; j < resp_ip6->n_addrs; j++) {
+        	const struct gr_ip6_ifaddr *addr = &resp_ip6->addrs[j];
+		struct in6_addr sin_addr;
+		uint8_t flags;
+
+		if (addr->iface_id == grout_if->id) {
+			memcpy(sin_addr.s6_addr, addr->addr.ip.a, sizeof(sin_addr.s6_addr));
+			connected_add_ipv6(iface, flags, &sin_addr, NULL, addr->addr.prefixlen,
+					NULL, 100);
+			iface->flags |= IFF_IPV6;
+		}
+	}
+}
+
+static const char * evt_to_str(uint32_t e) {
+	switch (e) {
+		case IFACE_EVENT_POST_ADD: return "ADD";
+		case IFACE_EVENT_PRE_REMOVE: return "REMOVE";
+		case IFACE_EVENT_STATUS_UP: return "UP";
+		case IFACE_EVENT_STATUS_DOWN: return "DOWN";
+		case IFACE_EVENT_POST_RECONFIG: "RECONFIG";
+		default: return "";
+	}
+}
+
+static void dplane_read_notifications(struct event *event) {
+	struct gr_infra_iface_get_resp *p;
+	struct gr_api_notification *n;
+	struct interface *iface;
+
+	if(gr_api_client_recv_notification(grout_ctx.notifs, &n) == 0) {
+		switch (n->type) {
+		case IFACE_EVENT_POST_ADD:
+		case IFACE_EVENT_STATUS_UP:
+		case IFACE_EVENT_STATUS_DOWN:
+		case IFACE_EVENT_POST_RECONFIG:
+			if (n->payload_len == sizeof(*p)) {
+				p = (struct gr_infra_iface_get_resp *)&n[1];
+				zlog_debug("Iface %s: %s", evt_to_str(n->type) , p->iface.name);
+				iface = if_get_by_name(p->iface.name, p->iface.vrf_id, NULL);
+				if(iface == NULL)
+					break;
+				sync_iface_status(iface, &p->iface);
+			};
+			break;
+		case IFACE_EVENT_PRE_REMOVE:
+			if (n->payload_len == sizeof(*p)) {
+				p = (struct gr_infra_iface_get_resp *)&n[1];
+				zlog_debug("Iface %s: %s", evt_to_str(n->type) , p->iface.name);
+				iface = if_get_by_name(p->iface.name, p->iface.vrf_id, NULL);
+				if(iface == NULL)
+					break;
+				if_delete(&iface);
+			};
+			break;
+		default:
+			zlog_debug("Unknown notification 0x%x received", n->type);
+			break;
+		}
+
+		free(n);
+	}
+
+	event_add_read(grout_ctx.dg_pthread->master, dplane_read_notifications, NULL,
+			grout_ctx.notifs->sock_fd, &grout_ctx.dg_t_update);
 }
 
 static enum zebra_dplane_result zd_grout_add_del_address(struct zebra_dplane_ctx *ctx) {
@@ -286,8 +425,6 @@ static void zd_grout_port_init(void)
 {
 	struct gr_infra_iface_list_req req = {.type = GR_IFACE_TYPE_UNDEF};
 	struct gr_infra_iface_list_resp *resp = NULL;
-	struct gr_ip4_addr_list_resp *resp_ip4 = NULL;
-	struct gr_ip6_addr_list_resp *resp_ip6 = NULL;
 	void * resp_ptr = NULL;
 
 	if (IS_ZEBRA_DEBUG_DPLANE_GROUT)
@@ -304,99 +441,16 @@ static void zd_grout_port_init(void)
 		goto cleanup;
 	}
 
-        if (gr_api_client_send_recv(grout_ctx.client, GR_IP4_ADDR_LIST, sizeof(req), &req, &resp_ptr) < 0) {
-		if (IS_ZEBRA_DEBUG_DPLANE_GROUT)
-			zlog_debug("Error listing ip4 addresses");
-		goto cleanup;
-	}
-	resp_ip4 = resp_ptr;
-
-        if (gr_api_client_send_recv(grout_ctx.client, GR_IP6_ADDR_LIST, sizeof(req), &req, &resp_ptr) < 0) {
-		if (IS_ZEBRA_DEBUG_DPLANE_GROUT)
-			zlog_debug("Error listing ip6 addresses");
-		goto cleanup;
-	}
-	resp_ip6 = resp_ptr;
-
 	for (int i = 0; i < resp->n_ifaces; i++) {
 		struct interface *iface = if_get_by_name(resp->ifaces[i].name, resp->ifaces[i].vrf_id, NULL);
 		if(iface == NULL)
 			continue;
 
-		if_set_index(iface, resp->ifaces[i].id +1000);
-		iface->status = ZEBRA_INTERFACE_ACTIVE | ZEBRA_INTERFACE_LINKDETECTION;
+		sync_iface_status(iface, &resp->ifaces[i]);
 
-		if (resp->ifaces[i].flags & GR_IFACE_F_UP)
-			iface->flags |= IFF_UP;
-		if (resp->ifaces[i].flags & GR_IFACE_F_PROMISC)
-			iface->flags |= IFF_PROMISC;
-		if (resp->ifaces[i].flags & GR_IFACE_F_ALLMULTI)
-			iface->flags |= IFF_ALLMULTI;
-		if (resp->ifaces[i].state & GR_IFACE_S_RUNNING)
-			iface->flags |= IFF_RUNNING | IFF_LOWER_UP;
-
-		// Force BROADCAST and MULTICAST
-		iface->flags |= IFF_BROADCAST | IFF_MULTICAST;
-
-		iface->speed = 25000;
-		// TODO: read metric from grout ?
-		iface->metric = 100;
-		iface->mtu = resp->ifaces[i].mtu;
-		iface->configured = true;
-		if (resp->ifaces[i].type == GR_IFACE_TYPE_PORT) {
-			memcpy(iface->hw_addr, &((struct gr_iface_info_port *)resp->ifaces[i].info)->mac, 6);
-			iface->hw_addr_len = 6;
-			iface->ll_type = ZEBRA_LLT_ETHER;
-		} else if (resp->ifaces[i].type == GR_IFACE_TYPE_VLAN) {
-			const struct gr_iface_info_vlan *vlan = (const struct gr_iface_info_vlan *)&resp->ifaces[i].info;
-
-		        struct zebra_if *zif = (struct zebra_if *)iface->info;
-	                struct zebra_l2info_vlan *vlan_info = &zif->l2info.vl;
-			zif->zif_type = ZEBRA_IF_VLAN;
-			zif->zif_slave_type = ZEBRA_IF_SLAVE_NONE;
-
-			vlan_info->vid = vlan->vlan_id;
-
-			memcpy(iface->hw_addr, &((struct gr_iface_info_vlan *)resp->ifaces[i].info)->mac, 6);
-			iface->hw_addr_len = 6;
-			iface->ll_type = ZEBRA_LLT_ETHER;
-
-			// Cheat for vlan interfaces, force it to be "running",
-			// Until https://github.com/DPDK/grout/issues/94 is fixed
-
-			iface->flags |= IFF_RUNNING | IFF_LOWER_UP;
-		}
-
-		for (size_t j = 0; j < resp_ip4->n_addrs; j++) {
-                	const struct gr_ip4_ifaddr *addr = &resp_ip4->addrs[j];
-			struct in_addr sin_addr;
-			uint8_t flags;
-
-			if (addr->iface_id == resp->ifaces[i].id) {
-				sin_addr.s_addr = addr->addr.ip;
-				connected_add_ipv4(iface, flags, &sin_addr, addr->addr.prefixlen, NULL,
-						NULL, 100);
-				iface->flags |= IFF_IPV4;
-			}
-		}
-
-		for (size_t j = 0; j < resp_ip6->n_addrs; j++) {
-                	const struct gr_ip6_ifaddr *addr = &resp_ip6->addrs[j];
-			struct in6_addr sin_addr;
-			uint8_t flags;
-
-			if (addr->iface_id == resp->ifaces[i].id) {
-				memcpy(sin_addr.s6_addr, addr->addr.ip.a, sizeof(sin_addr.s6_addr));
-				connected_add_ipv6(iface, flags, &sin_addr, NULL, addr->addr.prefixlen,
-						NULL, 100);
-				iface->flags |= IFF_IPV6;
-			}
-		}
 	}
 cleanup:
 	free(resp);
-	free(resp_ip4);
-	free(resp_ip6);
 }
 
 static int zd_grout_start(struct zebra_dplane_provider *prov)
@@ -409,8 +463,8 @@ static int zd_grout_start(struct zebra_dplane_provider *prov)
 	grout_ctx.dg_run = true;
 	grout_ctx.dg_pthread = frr_pthread_new(&pattr, "Zebra grout dplane thread",
 						  "zebra_grout_dplane");
-	event_add_event(grout_ctx.dg_pthread->master, dplane_read_notifications, NULL, 0,
-			&grout_ctx.dg_t_update);
+	event_add_read(grout_ctx.dg_pthread->master, dplane_read_notifications, NULL,
+			grout_ctx.notifs->sock_fd, &grout_ctx.dg_t_update);
 
 	frr_pthread_run(grout_ctx.dg_pthread, NULL);
 
@@ -445,7 +499,8 @@ static int zd_grout_plugin_init(struct event_loop *tm)
 {
 	int ret;
 	grout_ctx.client = gr_api_client_connect(GR_DEFAULT_SOCK_PATH);
-	// grout_ctx.notifs = gr_api_client_connect(GR_DEFAULT_SOCK_PATH);
+	grout_ctx.notifs = gr_api_client_connect(GR_DEFAULT_SOCK_PATH);
+	gr_api_client_enable_notifications(grout_ctx.notifs);
 
 	ret = dplane_provider_register(plugin_name,
 			DPLANE_PRIO_PRE_KERNEL,
