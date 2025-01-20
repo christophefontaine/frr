@@ -40,7 +40,7 @@ struct grout_ctx_t {
 	_Atomic bool dg_run;
 };
 
-static struct grout_ctx_t grout_ctx;
+struct grout_ctx_t grout_ctx;
 static const char *plugin_name = "zebra_dplane_grout";
 
 DEFINE_MTYPE_STATIC(ZEBRA, GROUT_PORTS, "ZD Grout port database");
@@ -152,6 +152,7 @@ static const char * evt_to_str(uint32_t e) {
 static void dplane_read_notifications(struct event *event) {
 	struct gr_infra_iface_get_resp *p;
 	struct gr_api_notification *n;
+	struct gr_ip4_nh *api_nh;
 	struct interface *iface;
 
 	if(gr_api_client_recv_notification(grout_ctx.notifs, &n) == 0) {
@@ -179,8 +180,21 @@ static void dplane_read_notifications(struct event *event) {
 				if_delete(&iface);
 			};
 			break;
+		case IP_EVENT_ADDR_DEL:
+			if (n->payload_len == sizeof(*api_nh)) {
+				struct in_addr sin_addr;
+				const char *ifname = ifindex2ifname(api_nh->iface_id + 1000,
+					       		            api_nh->vrf_id);
+				api_nh = (struct gr_ip4_nh *)&n[1];
+				iface = if_get_by_name(ifname, api_nh->vrf_id, NULL);
+				sin_addr.s_addr = api_nh->host;
+				connected_delete_ipv4(iface, 0, &sin_addr, 24, NULL);
+			}
+			break;
+		case IP_EVENT_ROUTE_DEL:
+			break;
 		default:
-			zlog_debug("Unknown notification 0x%x received", n->type);
+			zlog_debug("Unknown notification %s (0x%x) received", evt_to_str(n->type), n->type);
 			break;
 		}
 
@@ -260,6 +274,7 @@ static enum zebra_dplane_result zd_grout_add_del_address(struct zebra_dplane_ctx
 static enum zebra_dplane_result zd_grout_add_del_nexthop(struct zebra_dplane_ctx *ctx) {
 	// dummy function, NHs are created automatically bu grout ?
 	// FIXME: shouldn't return unconditionnaly, and should filter by interface
+	printf("zd_grout_add_del_nexthop");
 	return ZEBRA_DPLANE_REQUEST_SUCCESS;
 }
 
@@ -310,6 +325,11 @@ static enum zebra_dplane_result zd_grout_add_del_route(struct zebra_dplane_ctx *
 	return ZEBRA_DPLANE_REQUEST_FAILURE;
 }
 
+static enum zebra_dplane_result zd_grout_add_del_vlan(struct zebra_dplane_ctx *ctx) {
+	printf("VLAN\n");
+	return ZEBRA_DPLANE_REQUEST_SUCCESS;
+}
+
 /* Grout provider callback.
  */
 static enum zebra_dplane_result zd_grout_process_update(struct zebra_dplane_ctx *ctx)
@@ -330,11 +350,23 @@ static enum zebra_dplane_result zd_grout_process_update(struct zebra_dplane_ctx 
 	case DPLANE_OP_NH_UPDATE:
 	case DPLANE_OP_NH_DELETE:
 		return zd_grout_add_del_nexthop(ctx);
+
+	case DPLANE_OP_INTF_INSTALL:
+	case DPLANE_OP_INTF_UPDATE:
+	case DPLANE_OP_INTF_DELETE:
+	case DPLANE_OP_VLAN_INSTALL:
+		return zd_grout_add_del_vlan(ctx);
+
+	case DPLANE_OP_NONE:
+		return ZEBRA_DPLANE_REQUEST_SUCCESS;
+
+	case DPLANE_OP_INTF_NETCONFIG:
+		zlog_debug("dplane provider grout op %s", dplane_op2str(dplane_ctx_get_op(ctx)));
+
 	case DPLANE_OP_ROUTE_NOTIFY:
 	case DPLANE_OP_RULE_ADD:
 	case DPLANE_OP_RULE_UPDATE:
 	case DPLANE_OP_RULE_DELETE:
-	case DPLANE_OP_NONE:
 	case DPLANE_OP_LSP_INSTALL:
 	case DPLANE_OP_LSP_UPDATE:
 	case DPLANE_OP_LSP_DELETE:
@@ -360,11 +392,6 @@ static enum zebra_dplane_result zd_grout_process_update(struct zebra_dplane_ctx 
 	case DPLANE_OP_NEIGH_IP_DELETE:
 	case DPLANE_OP_NEIGH_TABLE_UPDATE:
 	case DPLANE_OP_GRE_SET:
-	case DPLANE_OP_INTF_NETCONFIG:
-	case DPLANE_OP_INTF_INSTALL:
-	case DPLANE_OP_INTF_UPDATE:
-	case DPLANE_OP_INTF_DELETE:
-	case DPLANE_OP_VLAN_INSTALL:
 	default:
 		return ZEBRA_DPLANE_REQUEST_FAILURE;
 	}
@@ -383,15 +410,17 @@ static int zd_grout_process(struct zebra_dplane_provider *prov)
 		if (ctx == NULL)
 			break;
 
-		if (IS_ZEBRA_DEBUG_DPLANE_GROUT_DETAIL)
+		if (IS_ZEBRA_DEBUG_DPLANE_GROUT)
 			zlog_debug("dplane provider '%s': op %s",
 				   dplane_provider_get_name(prov),
 				   dplane_op2str(dplane_ctx_get_op(ctx)));
 
 		ret = zd_grout_process_update(ctx);
 		dplane_ctx_set_status(ctx, ret);
-		if (ret == ZEBRA_DPLANE_REQUEST_SUCCESS)
-			dplane_ctx_set_skip_kernel(ctx);
+	//	if (ret == ZEBRA_DPLANE_REQUEST_SUCCESS) {
+	//		dplane_ctx_set_skip_kernel(ctx);
+	//		dplane_ctx_fini(ctx);
+	//	}
 
 		dplane_provider_enqueue_out_ctx(prov, ctx);
 	}
@@ -500,6 +529,10 @@ static int zd_grout_plugin_init(struct event_loop *tm)
 	int ret;
 	grout_ctx.client = gr_api_client_connect(GR_DEFAULT_SOCK_PATH);
 	grout_ctx.notifs = gr_api_client_connect(GR_DEFAULT_SOCK_PATH);
+
+	if (!grout_ctx.client || !grout_ctx.notifs)
+		return -1;
+
 	gr_api_client_enable_notifications(grout_ctx.notifs);
 
 	ret = dplane_provider_register(plugin_name,
