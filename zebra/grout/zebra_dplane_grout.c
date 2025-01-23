@@ -152,7 +152,7 @@ static const char * evt_to_str(uint32_t e) {
 static void dplane_read_notifications(struct event *event) {
 	struct gr_infra_iface_get_resp *p;
 	struct gr_api_notification *n;
-	struct gr_ip4_nh *api_nh;
+	struct gr_nexthop *api_nh;
 	struct interface *iface;
 
 	if(gr_api_client_recv_notification(grout_ctx.notifs, &n) == 0) {
@@ -185,9 +185,9 @@ static void dplane_read_notifications(struct event *event) {
 				struct in_addr sin_addr;
 				const char *ifname = ifindex2ifname(api_nh->iface_id + 1000,
 					       		            api_nh->vrf_id);
-				api_nh = (struct gr_ip4_nh *)&n[1];
+				api_nh = (struct gr_nexthop *)&n[1];
 				iface = if_get_by_name(ifname, api_nh->vrf_id, NULL);
-				sin_addr.s_addr = api_nh->host;
+				sin_addr.s_addr = api_nh->ipv4;
 				connected_delete_ipv4(iface, 0, &sin_addr, 24, NULL);
 			}
 			break;
