@@ -152,8 +152,10 @@ static const char * evt_to_str(uint32_t e) {
 static void dplane_read_notifications(struct event *event) {
 	struct gr_infra_iface_get_resp *p;
 	struct gr_api_notification *n;
-	struct gr_ip4_nh *api_nh;
+	struct gr_nexthop *api_nh;
 	struct interface *iface;
+	struct in_addr sin_addr;
+	const char *ifname;
 
 	if(gr_api_client_recv_notification(grout_ctx.notifs, &n) == 0) {
 		switch (n->type) {
@@ -161,37 +163,42 @@ static void dplane_read_notifications(struct event *event) {
 		case IFACE_EVENT_STATUS_UP:
 		case IFACE_EVENT_STATUS_DOWN:
 		case IFACE_EVENT_POST_RECONFIG:
-			if (n->payload_len == sizeof(*p)) {
 				p = (struct gr_infra_iface_get_resp *)&n[1];
 				zlog_debug("Iface %s: %s", evt_to_str(n->type) , p->iface.name);
 				iface = if_get_by_name(p->iface.name, p->iface.vrf_id, NULL);
 				if(iface == NULL)
 					break;
 				sync_iface_status(iface, &p->iface);
-			};
 			break;
 		case IFACE_EVENT_PRE_REMOVE:
-			if (n->payload_len == sizeof(*p)) {
 				p = (struct gr_infra_iface_get_resp *)&n[1];
 				zlog_debug("Iface %s: %s", evt_to_str(n->type) , p->iface.name);
 				iface = if_get_by_name(p->iface.name, p->iface.vrf_id, NULL);
 				if(iface == NULL)
 					break;
 				if_delete(&iface);
-			};
+			break;
+		case IP_EVENT_ADDR_ADD:
+				api_nh = PAYLOAD(n);
+				ifname = ifindex2ifname(api_nh->iface_id + 1000, api_nh->vrf_id);
+				iface = if_get_by_name(ifname, api_nh->vrf_id, NULL);
+				sin_addr.s_addr = api_nh->ipv4;
+				connected_add_ipv4(iface, 0, &sin_addr, 24, NULL,
+							NULL, 100);
 			break;
 		case IP_EVENT_ADDR_DEL:
-			if (n->payload_len == sizeof(*api_nh)) {
-				struct in_addr sin_addr;
-				const char *ifname = ifindex2ifname(api_nh->iface_id + 1000,
-					       		            api_nh->vrf_id);
-				api_nh = (struct gr_ip4_nh *)&n[1];
+				api_nh = PAYLOAD(n);
+				ifname = ifindex2ifname(api_nh->iface_id + 1000, api_nh->vrf_id);
 				iface = if_get_by_name(ifname, api_nh->vrf_id, NULL);
-				sin_addr.s_addr = api_nh->host;
+				sin_addr.s_addr = api_nh->ipv4;
 				connected_delete_ipv4(iface, 0, &sin_addr, 24, NULL);
-			}
 			break;
+		case IP_EVENT_ROUTE_ADD:
 		case IP_EVENT_ROUTE_DEL:
+			break;
+		case NEXTHOP_EVENT_NEW:
+		case NEXTHOP_EVENT_DELETE:
+		case NEXTHOP_EVENT_UPDATE:
 			break;
 		default:
 			zlog_debug("Unknown notification %s (0x%x) received", evt_to_str(n->type), n->type);
