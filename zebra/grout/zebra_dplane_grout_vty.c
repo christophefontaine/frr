@@ -46,7 +46,7 @@ DEFPY(zebra_grout_vlan_add, zebra_grout_vlan_add_del_cmd,
 	"\n")
 {
 	bool delete = no;
-	printf("add vlan %d on iface %s\n", id, ifname);
+	printf("add vlan %ld on iface %s\n", id, ifname);
 	return CMD_SUCCESS;
 }
 
