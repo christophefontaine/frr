@@ -31,6 +31,8 @@
 #include <gr_ip4.h>
 #include <gr_ip6.h>
 
+#define GROUT_INDEX_OFFSET 0
+
 struct grout_ctx_t {
 	struct gr_api_client *client;
 	struct gr_api_client *notifs;
@@ -94,7 +96,7 @@ static void sync_iface_status(struct interface *iface, struct gr_iface* grout_if
 	}
 	resp_ip6 = resp_ptr;
 
-	if_set_index(iface, grout_if->id +1000);
+	if_set_index(iface, grout_if->id + GROUT_INDEX_OFFSET);
 	iface->status = ZEBRA_INTERFACE_ACTIVE | ZEBRA_INTERFACE_LINKDETECTION;
 
 	if (grout_if->flags & GR_IFACE_F_UP)
@@ -218,7 +220,7 @@ static void dplane_read_notifications(struct event *event) {
 		break;
 	case IP_EVENT_ADDR_ADD:
 			api_nh = PAYLOAD(e);
-			ifname = ifindex2ifname(api_nh->iface_id + 1000, api_nh->vrf_id);
+			ifname = ifindex2ifname(api_nh->iface_id + GROUT_INDEX_OFFSET, api_nh->vrf_id);
 			iface = if_get_by_name(ifname, api_nh->vrf_id, NULL);
 			sin_addr.s_addr = api_nh->ipv4;
 			connected_add_ipv4(iface, 0, &sin_addr, 24, NULL,
@@ -226,7 +228,7 @@ static void dplane_read_notifications(struct event *event) {
 		break;
 	case IP_EVENT_ADDR_DEL:
 			api_nh = PAYLOAD(e);
-			ifname = ifindex2ifname(api_nh->iface_id + 1000, api_nh->vrf_id);
+			ifname = ifindex2ifname(api_nh->iface_id + GROUT_INDEX_OFFSET, api_nh->vrf_id);
 			iface = if_get_by_name(ifname, api_nh->vrf_id, NULL);
 			sin_addr.s_addr = api_nh->ipv4;
 			connected_delete_ipv4(iface, 0, &sin_addr, 24, NULL);
@@ -253,7 +255,7 @@ static enum zebra_dplane_result zd_grout_add_del_address(struct zebra_dplane_ctx
 	int vrf = dplane_ctx_get_vrf(ctx);
 	int iface_index = dplane_ctx_get_ifindex(ctx);
 	struct interface *iface = if_lookup_by_index(iface_index, vrf);
-	int iface_id = iface_index - 1000;
+	int iface_id = iface_index - GROUT_INDEX_OFFSET;
 	const struct prefix *p = dplane_ctx_get_intf_addr(ctx);
 
 	if (p->family == AF_INET) {
