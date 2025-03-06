@@ -506,23 +506,20 @@ static void zd_grout_port_sync(void)
 	struct interface *ifp;
 	struct vrf *vrf;
 
-	RB_FOREACH (vrf, vrf_id_head, &vrfs_by_id) {
+	RB_FOREACH (vrf, vrf_id_head, &vrfs_by_id)
 		if_terminate(vrf);
-	}
 
 	if (IS_ZEBRA_DEBUG_DPLANE_GROUT)
-		zlog_debug("grout port init");
+		zlog_debug("grout port sync");
 
-	if (gr_api_client_send_recv(grout_ctx.client, GR_INFRA_IFACE_LIST, sizeof(req), &req, &resp_ptr) < 0) {
+	if (gr_api_client_send_recv(grout_ctx.client, GR_INFRA_IFACE_LIST, sizeof(req), &req, &resp_ptr) < 0)
 		return;
-	}
+	
 	resp = resp_ptr;
 
-	if (resp->n_ifaces == 0) {
+	if (resp->n_ifaces == 0)
 		if (IS_ZEBRA_DEBUG_DPLANE_GROUT)
 			zlog_debug("no probed ethernet devices");
-		goto cleanup;
-	}
 
 	for (int i = 0; i < resp->n_ifaces; i++) {
 		struct interface *iface = if_get_by_name(resp->ifaces[i].name, resp->ifaces[i].vrf_id, NULL);
