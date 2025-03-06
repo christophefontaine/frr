@@ -66,12 +66,12 @@ static void grout_client_connect(struct event *t) {
 		zd_grout_port_sync();
 	}
 
-	event_add_read(grout_ctx.dg_pthread->master, dplane_read_notifications, NULL,
+	event_add_read(zrouter.master, dplane_read_notifications, NULL,
 			grout_ctx.notifs->sock_fd, &grout_ctx.dg_t_update);
 	return;
 
 reschedule_connect:
-	event_add_timer(grout_ctx.dg_pthread->master, grout_client_connect, NULL, 1,
+	event_add_timer(zrouter.master, grout_client_connect, NULL, 1,
 				&grout_ctx.dg_t_update);
 }
 
@@ -193,7 +193,7 @@ static void dplane_read_notifications(struct event *event) {
 		gr_api_client_disconnect(grout_ctx.client);
 		grout_ctx.notifs = NULL;
 		grout_ctx.client = NULL;
-		event_add_timer(grout_ctx.dg_pthread->master, grout_client_connect, NULL, 1,
+		event_add_timer(zrouter.master, grout_client_connect, NULL, 1,
 				&grout_ctx.dg_t_update);
 		return;
 	}
@@ -247,7 +247,7 @@ static void dplane_read_notifications(struct event *event) {
 
 	free(e);
 
-	event_add_read(grout_ctx.dg_pthread->master, dplane_read_notifications, NULL,
+	event_add_read(zrouter.master, dplane_read_notifications, NULL,
 		grout_ctx.notifs->sock_fd, &grout_ctx.dg_t_update);
 }
 
@@ -530,30 +530,20 @@ static void zd_grout_port_sync(void)
 			continue;
 
 		sync_iface_status(iface, &resp->ifaces[i]);
-
 	}
+
 cleanup:
 	free(resp);
 }
 
 static int zd_grout_start(struct zebra_dplane_provider *prov)
 {
-
 	struct frr_pthread_attr pattr = {
 		.start = frr_pthread_attr_default.start,
 		.stop = frr_pthread_attr_default.stop,
 	};
 
-	grout_ctx.dg_run = true;
-	grout_ctx.dg_pthread = frr_pthread_new(&pattr, "Zebra grout dplane thread",
-						  "zebra_grout_dplane");
-
-	frr_pthread_run(grout_ctx.dg_pthread, NULL);
-	frr_pthread_wait_running(grout_ctx.dg_pthread);
-
-	event_add_timer(grout_ctx.dg_pthread->master, grout_client_connect, NULL, 1,
-				&grout_ctx.dg_t_update);
-
+	event_add_timer(zrouter.master, grout_client_connect, NULL, 1, NULL);
 
 	if (IS_ZEBRA_DEBUG_DPLANE_GROUT)
 		zlog_debug("%s start", dplane_provider_get_name(prov));
@@ -565,14 +555,6 @@ static int zd_grout_start(struct zebra_dplane_provider *prov)
 
 static int zd_grout_finish(struct zebra_dplane_provider *prov, bool early)
 {
-	if (early) {
-		frr_pthread_stop(grout_ctx.dg_pthread, NULL);
-		return 0;
-	}
-
-	/* Destroy pthread */
-	frr_pthread_destroy(grout_ctx.dg_pthread);
-
 	gr_api_client_disconnect(grout_ctx.client);
 	gr_api_client_disconnect(grout_ctx.notifs);
 	grout_ctx.notifs = NULL;
