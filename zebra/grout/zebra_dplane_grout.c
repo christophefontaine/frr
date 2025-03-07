@@ -36,10 +36,8 @@
 struct grout_ctx_t {
 	struct gr_api_client *client;
 	struct gr_api_client *notifs;
-	struct frr_pthread *dg_pthread;
 	/* Event/'thread' pointer for queued updates */
 	struct event *dg_t_update;
-	_Atomic bool dg_run;
 };
 
 struct grout_ctx_t grout_ctx = {0};
@@ -138,12 +136,11 @@ static void sync_iface_status(struct interface *iface, struct gr_iface* grout_if
 	for (size_t j = 0; j < resp_ip4->n_addrs; j++) {
         	const struct gr_ip4_ifaddr *addr = &resp_ip4->addrs[j];
 		struct in_addr sin_addr;
-		uint8_t flags;
+		uint8_t flags = 0;
 
 		if (addr->iface_id == grout_if->id) {
 			sin_addr.s_addr = addr->addr.ip;
-			connected_add_ipv4(iface, flags, &sin_addr, addr->addr.prefixlen, NULL,
-					NULL, 100);
+			connected_add_ipv4(iface, flags, &sin_addr, addr->addr.prefixlen, NULL, NULL, 100);
 			iface->flags |= IFF_IPV4;
 		}
 	}
@@ -151,12 +148,11 @@ static void sync_iface_status(struct interface *iface, struct gr_iface* grout_if
 	for (size_t j = 0; j < resp_ip6->n_addrs; j++) {
         	const struct gr_ip6_ifaddr *addr = &resp_ip6->addrs[j];
 		struct in6_addr sin_addr;
-		uint8_t flags;
+		uint8_t flags = 0;
 
 		if (addr->iface_id == grout_if->id) {
 			memcpy(sin_addr.s6_addr, addr->addr.ip.a, sizeof(sin_addr.s6_addr));
-			connected_add_ipv6(iface, flags, &sin_addr, NULL, addr->addr.prefixlen,
-					NULL, 100);
+			connected_add_ipv6(iface, flags, &sin_addr, NULL, addr->addr.prefixlen, NULL, 100);
 			iface->flags |= IFF_IPV6;
 		}
 	}
@@ -218,8 +214,7 @@ static void dplane_read_notifications(struct event *event) {
 			ifname = ifindex2ifname(api_nh->iface_id + GROUT_INDEX_OFFSET, api_nh->vrf_id);
 			iface = if_get_by_name(ifname, api_nh->vrf_id, NULL);
 			sin_addr.s_addr = api_nh->ipv4;
-			connected_add_ipv4(iface, 0, &sin_addr, 24, NULL,
-						NULL, 100);
+			connected_add_ipv4(iface, 0, &sin_addr, 24, NULL, NULL, 100);
 		break;
 	case IP_EVENT_ADDR_DEL:
 			api_nh = PAYLOAD(e);
@@ -263,8 +258,7 @@ static enum zebra_dplane_result zd_grout_add_del_address(struct zebra_dplane_ctx
 	        if (gr_api_client_send_recv(grout_ctx.client, GR_IP4_ADDR_ADD, sizeof(req), &req, NULL) < 0)
 			zlog_debug("Grout error add IP.");
 		else {
-			connected_add_ipv4(iface, 0, &p->u.prefix4, p->prefixlen, NULL,
-						NULL, 100);
+			connected_add_ipv4(iface, 0, &p->u.prefix4, p->prefixlen, NULL, NULL, 100);
 			return ZEBRA_DPLANE_REQUEST_SUCCESS;
 		}
 		} else {
@@ -313,7 +307,7 @@ static enum zebra_dplane_result zd_grout_add_del_address(struct zebra_dplane_ctx
 }
 
 static enum zebra_dplane_result zd_grout_add_del_nexthop(struct zebra_dplane_ctx *ctx) {
-	// dummy function, NHs are created automatically bu grout ?
+	// dummy function, NHs are created automatically by grout ?
 	// FIXME: shouldn't return unconditionnaly, and should filter by interface
 	printf("zd_grout_add_del_nexthop");
 	return ZEBRA_DPLANE_REQUEST_SUCCESS;
@@ -497,31 +491,37 @@ static void zd_grout_port_sync(void)
 {
 	struct gr_infra_iface_list_req req = {.type = GR_IFACE_TYPE_UNDEF};
 	struct gr_infra_iface_list_resp *resp = NULL;
+	struct interface *ifp, *itmp;
+	struct vrf *vrf, *vtmp;
 	void * resp_ptr = NULL;
-	struct interface *ifp;
-	struct vrf *vrf;
-
-	RB_FOREACH (vrf, vrf_id_head, &vrfs_by_id)
-		if_terminate(vrf);
 
 	if (IS_ZEBRA_DEBUG_DPLANE_GROUT)
 		zlog_debug("grout port sync");
+
+	// Remove all connected routes and interfaces
+	RB_FOREACH (vrf, vrf_id_head, &vrfs_by_id) {
+		RB_FOREACH_SAFE(ifp, if_name_head, &vrf->ifaces_by_name, itmp) {
+			struct connected *ifc;
+			frr_each_safe (if_connected, ifp->connected, ifc)
+				if_connected_del(ifp->connected, ifc);
+
+			if_delete(&ifp);
+		}
+	}
 
 	if (gr_api_client_send_recv(grout_ctx.client, GR_INFRA_IFACE_LIST, sizeof(req), &req, &resp_ptr) < 0)
 		return;
 	
 	resp = resp_ptr;
 
-	if (resp->n_ifaces == 0)
-		if (IS_ZEBRA_DEBUG_DPLANE_GROUT)
-			zlog_debug("no probed ethernet devices");
+	if (resp->n_ifaces == 0 && IS_ZEBRA_DEBUG_DPLANE_GROUT)
+		zlog_debug("no probed ethernet devices");
+
 
 	for (int i = 0; i < resp->n_ifaces; i++) {
 		struct interface *iface = if_get_by_name(resp->ifaces[i].name, resp->ifaces[i].vrf_id, NULL);
-		if(iface == NULL)
-			continue;
-
-		sync_iface_status(iface, &resp->ifaces[i]);
+		if (iface)
+			sync_iface_status(iface, &resp->ifaces[i]);
 	}
 
 cleanup:
