@@ -133,11 +133,6 @@ static void sync_iface_status(struct interface *iface, struct gr_iface* grout_if
 		memcpy(iface->hw_addr, &((struct gr_iface_info_vlan *)grout_if->info)->mac, 6);
 		iface->hw_addr_len = 6;
 		iface->ll_type = ZEBRA_LLT_ETHER;
-
-		// Cheat for vlan interfaces, force it to be "running",
-		// Until https://github.com/DPDK/grout/issues/94 is fixed
-
-		iface->flags |= IFF_RUNNING | IFF_LOWER_UP;
 	}
 
 	for (size_t j = 0; j < resp_ip4->n_addrs; j++) {
