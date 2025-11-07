@@ -1452,18 +1452,20 @@ static void zebra_if_netconf_update_ctx(struct zebra_dplane_ctx *ctx,
 }
 
 static void interface_vrf_change(enum dplane_op_e op, ifindex_t ifindex,
+				vrf_id_t vrf_id,
 				 const char *name, uint32_t tableid,
 				 ns_id_t ns_id)
 {
 	struct vrf *vrf;
 	struct zebra_vrf *zvrf = NULL;
+	struct zebra_ns *ns;
+	struct interface *ifp;
 
 	if (op == DPLANE_OP_INTF_DELETE) {
 		if (IS_ZEBRA_DEBUG_DPLANE)
 			zlog_debug("DPLANE_OP_INTF_DELETE for VRF %s(%u)", name,
 				   ifindex);
-
-		vrf = vrf_lookup_by_id((vrf_id_t)ifindex);
+		vrf = vrf_lookup_by_id(vrf_id);
 		if (!vrf) {
 			flog_warn(EC_ZEBRA_VRF_NOT_FOUND,
 				  "%s(%u): vrf not found", name, ifindex);
@@ -1487,7 +1489,7 @@ static void interface_vrf_change(enum dplane_op_e op, ifindex_t ifindex,
 		if (exist_id != VRF_DEFAULT || strmatch(name, VRF_DEFAULT_NAME)) {
 			vrf = vrf_lookup_by_id(exist_id);
 
-			if (!vrf_lookup_by_id((vrf_id_t)ifindex) && !vrf) {
+			if (!vrf_lookup_by_id(vrf_id) && !vrf) {
 				flog_err(EC_ZEBRA_VRF_NOT_FOUND,
 					 "VRF %s id %u does not exist", name,
 					 ifindex);
@@ -1502,7 +1504,7 @@ static void interface_vrf_change(enum dplane_op_e op, ifindex_t ifindex,
 			}
 		}
 
-		vrf = vrf_update((vrf_id_t)ifindex, name);
+		vrf = vrf_update(vrf_id, name);
 		if (!vrf) {
 			flog_err(EC_LIB_INTERFACE, "VRF %s id %u not created",
 				 name, ifindex);
@@ -1940,7 +1942,7 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 		if_delete_update(&ifp);
 
 		if (zif_type == ZEBRA_IF_VRF && !vrf_is_backend_netns())
-			interface_vrf_change(op, ifindex, name, tableid, ns_id);
+			interface_vrf_change(op, ifindex, VRF_DEFAULT, name, tableid, ns_id);
 	} else {
 		ifindex_t master_ifindex, bridge_ifindex, link_ifindex;
 		enum zebra_slave_iftype zif_slave_type;
@@ -1958,7 +1960,7 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 
 		/* If VRF, create or update the VRF structure itself. */
 		if (zif_type == ZEBRA_IF_VRF && !vrf_is_backend_netns())
-			interface_vrf_change(op, ifindex, name, tableid, ns_id);
+			interface_vrf_change(op, ifindex, dplane_ctx_get_ifp_vrf_id(ctx), name, tableid, ns_id);
 
 		master_ifindex = dplane_ctx_get_ifp_master_ifindex(ctx);
 		zif_slave_type = dplane_ctx_get_ifp_zif_slave_type(ctx);
